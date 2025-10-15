@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Streamlit caches
+.streamlit/secrets.toml
+**/.cache/
+**/.pytest_cache/
+
+# Datos locales si pruebas en tu PC
+/data/
+flags/
+photos/
+exports/
+scouting_u17.db

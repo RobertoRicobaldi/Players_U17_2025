@@ -24,6 +24,7 @@ st.set_page_config(page_title="Scouting U17 — Marruecos 2025", page_icon="⚽"
 DATA_DIR = os.getenv("DATA_DIR") or ("/data" if os.path.isdir("/data") else ".")
 DB_PATH     = os.path.join(DATA_DIR, "scouting_u17.db")
 FLAGS_DIR   = os.path.join(DATA_DIR, "flags")
+AUTO_IMPORT_PLAYERS = (os.getenv("AUTO_IMPORT_PLAYERS", "0") == "1")
 PHOTOS_DIR  = os.path.join(DATA_DIR, "photos")
 EXPORTS_DIR = os.path.join(DATA_DIR, "exports")
 for d in (FLAGS_DIR, PHOTOS_DIR, EXPORTS_DIR):
@@ -382,27 +383,31 @@ _migrate_add_managers()
 def fetch_df(query: str, params: Tuple = ()):
     return pd.read_sql_query(query, conn, params=params)
 
-# ====== Bootstrap automático en servidor (primera vez) ======
 def _bootstrap_if_needed():
     try:
-        # 1) Managers y calendario si faltan
+        # 1) Managers y calendario si faltan (siempre seguros)
         ct_teams = int(fetch_df("SELECT COUNT(*) AS c FROM teams").iloc[0]["c"])
         if ct_teams == 0:
             seed_managers_fixed()
+
         ct_matches = int(fetch_df("SELECT COUNT(*) AS c FROM matches").iloc[0]["c"])
         if ct_matches == 0:
             seed_official_matches(replace_all=True)
 
-        # 2) Jugadoras 2025 desde el Excel del repo, si aún no hay
+        # 2) Jugadoras 2025 desde el Excel del repo
         ct_players_2025 = int(fetch_df(
             "SELECT COUNT(*) AS c FROM player_tournaments WHERE tournament_year=2025"
         ).iloc[0]["c"])
-        if ct_players_2025 == 0 and os.path.exists(EXCEL_PATH_REPO):
+
+        # Importa SIEMPRE si AUTO_IMPORT_PLAYERS=1,
+        # o si todavía no hay jugadoras 2025
+        if os.path.exists(EXCEL_PATH_REPO) and (AUTO_IMPORT_PLAYERS or ct_players_2025 == 0):
             import_players_from_excel(EXCEL_PATH_REPO)
             clear_caches()
     except Exception:
-        # No bloqueamos la app si algo falla al bootstrapear
+        # no bloqueamos la app si algo falla al bootstrap
         pass
+
 
 _bootstrap_if_needed()
 

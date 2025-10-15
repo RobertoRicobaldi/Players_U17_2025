@@ -20,15 +20,28 @@ matplotlib.use("Agg")  # backend seguro para servidores/headless
 
 st.set_page_config(page_title="Scouting U17 — Marruecos 2025", page_icon="⚽", layout="wide")
 
-# === Rutas base con soporte de disco persistente (/data) ===
-DATA_DIR = os.getenv("DATA_DIR") or ("/data" if os.path.isdir("/data") else ".")
+# === Rutas base con soporte de disco persistente ===
+# Prioridad: envvar DATA_DIR -> /data (si existe) -> ~/.scouting_u17 -> .
+def _resolve_data_dir() -> str:
+    if os.getenv("DATA_DIR"):
+        return os.getenv("DATA_DIR")
+    if os.path.isdir("/data"):
+        return "/data"
+    home = os.path.expanduser("~")
+    cand = os.path.join(home, ".scouting_u17")
+    os.makedirs(cand, exist_ok=True)
+    return cand if os.path.isdir(cand) else "."
+
+DATA_DIR = _resolve_data_dir()
 DB_PATH     = os.path.join(DATA_DIR, "scouting_u17.db")
 FLAGS_DIR   = os.path.join(DATA_DIR, "flags")
-AUTO_IMPORT_PLAYERS = (os.getenv("AUTO_IMPORT_PLAYERS", "0") == "1")
 PHOTOS_DIR  = os.path.join(DATA_DIR, "photos")
 EXPORTS_DIR = os.path.join(DATA_DIR, "exports")
 for d in (FLAGS_DIR, PHOTOS_DIR, EXPORTS_DIR):
     os.makedirs(d, exist_ok=True)
+
+# Permite auto-importar jugadoras del Excel al arrancar
+AUTO_IMPORT_PLAYERS = (os.getenv("AUTO_IMPORT_PLAYERS", "1") == "1")  # por defecto ACTIVADO
 
 # Excel del repo (misma carpeta que el .py)
 EXCEL_DEFAULT   = "Players U17 World Cup Marruecos 2025.xlsx"
@@ -1107,36 +1120,41 @@ with tabs[3]:
             c1, c2, c3 = st.columns([1, 1, 1])
 
             # ---------- Exportar PDF ----------
+            def _safe_fname(s: str) -> str:
+                base = re.sub(r"[^A-Za-z0-9_-]+", "_", str(s).strip())
+                return base.strip("_") or "player"
+
             with c1:
                 if st.button("📝 Exportar PDF", use_container_width=True, key=f"expdf_{pid}"):
                     os.makedirs(EXPORTS_DIR, exist_ok=True)
-                    out_path = os.path.join(EXPORTS_DIR, f"{prow['name']}_U17_2025.pdf")
-                    res = export_player_pdf(pid, out_path)
+                    fname = f"{_safe_fname(prow['name'])}_U17_2025.pdf"
+                    out_path = os.path.join(EXPORTS_DIR, fname)
 
+                    res = export_player_pdf(pid, out_path)
                     if not res:
                         st.warning("No se pudo exportar el PDF.")
                     else:
-                        # Soporta (ruta, bytes) o sólo ruta
-                        if isinstance(res, tuple):
-                            saved_path, pdf_bytes = res
-                        else:
-                            saved_path = res
+                        saved_path, pdf_bytes = res if isinstance(res, tuple) else (res, None)
+                        if pdf_bytes is None:
                             try:
                                 with open(saved_path, "rb") as f:
                                     pdf_bytes = f.read()
                             except Exception:
                                 pdf_bytes = None
 
-                        st.success(f"Exportado en: {saved_path}")
+                        st.toast(f"PDF listo: {fname}")  # notificación discreta
                         if pdf_bytes:
                             st.download_button(
-                                label="⬇️ Descargar PDF",
+                                "⬇️ Descargar PDF",
                                 data=pdf_bytes,
-                                file_name=os.path.basename(saved_path),
+                                file_name=fname,
                                 mime="application/pdf",
                                 use_container_width=True,
                                 key=f"dl_{pid}"
                             )
+                        else:
+                            st.warning("No se pudieron preparar los bytes del PDF para la descarga.")
+
 
             # ---------- Editar última valoración ----------
             with c2:

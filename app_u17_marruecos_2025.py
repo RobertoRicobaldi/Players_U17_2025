@@ -860,34 +860,66 @@ tabs = st.tabs(["🛠️ Admin", "📅 Partidos", "⚡ Valoración", "⭐ Destac
 
 # ========== Admin ==========
 with tabs[0]:
+    # --- Admin: edición de manager segura ---
     st.subheader("Datos base")
     c1, c2, c3 = st.columns(3)
+
     with c1:
         if st.button("Cargar/actualizar MANAGERS fijos (24)", use_container_width=True):
-            seed_managers_fixed(); st.success("Managers guardados.")
+            seed_managers_fixed()
+            # Evita que el select conserve una selección inválida tras cambiar la tabla
+            st.session_state.pop("mgr_team_sel", None)
+            clear_caches()
+            st.success("Managers guardados.")
+
     with c2:
         if st.button("Reemplazar calendario oficial (sólo estos)", use_container_width=True):
-            seed_official_matches(replace_all=True); st.success("Calendario oficial cargado (y anteriores eliminados).")
+            seed_official_matches(replace_all=True)
+            st.session_state.pop("mgr_team_sel", None)
+            clear_caches()
+            st.success("Calendario oficial cargado (y anteriores eliminados).")
+
     with c3:
         if st.button("Compactar equipos duplicados", use_container_width=True):
             n = compact_team_duplicates()
             st.success(f"Compactados {n} duplicados.") if n else st.info("No había duplicados.")
+            st.session_state.pop("mgr_team_sel", None)
             clear_caches()
 
     st.markdown("— Edita **manager** manualmente (móvil friendly):")
     tdf_raw = list_teams().copy()
+
     # sólo las 24 selecciones oficiales + dedupe por nombre
     tdf = tdf_raw[tdf_raw["name"].isin(OFFICIAL_TEAMS)].copy()
     if not tdf.empty:
         tdf["_k"] = tdf["name"].astype(str).str.strip().str.casefold()
-        tdf = tdf.sort_values(["_k","id"]).drop_duplicates(subset=["_k"], keep="last").drop(columns=["_k"])
-        tdf = tdf.sort_values("name")
-    tname = st.selectbox("Selección", options=(tdf["name"].tolist() if not tdf.empty else []), key="mgr_team_sel")
-    cur_mgr = tdf.loc[tdf["name"]==tname, "manager"].fillna("").values[0] if not tdf.empty else ""
+        tdf = (
+            tdf.sort_values(["_k", "id"])
+               .drop_duplicates(subset=["_k"], keep="last")
+               .drop(columns=["_k"])
+               .sort_values("name")
+        )
+
+    options = tdf["name"].tolist() if not tdf.empty else []
+    tname = st.selectbox("Selección", options=options, key="mgr_team_sel")
+
+    # Manager actual (SAFE)
+    def _safe_manager(df: pd.DataFrame, name: Optional[str]) -> str:
+        if df.empty or not name:
+            return ""
+        col = df.loc[df["name"] == name, "manager"]
+        return str(col.iloc[0]) if not col.empty else ""
+
+    cur_mgr = _safe_manager(tdf, tname)
     new_mgr = st.text_input("Entrenador/a", value=cur_mgr, key="mgr_name_edit")
-    if st.button("💾 Guardar entrenador/a", use_container_width=True):
+
+    # Botón guardar protegido (deshabilitado si no hay selección)
+    if st.button("💾 Guardar entrenador/a", use_container_width=True, disabled=not bool(tname)):
         conn.execute("UPDATE teams SET manager=? WHERE name=?", (new_mgr.strip(), tname))
-        conn.commit(); clear_caches(); st.success("Actualizado.")
+        conn.commit()
+        clear_caches()
+        st.success("Actualizado.")
+
 
     st.divider()
     st.write("**Selecciones (Mundial 2025)**")

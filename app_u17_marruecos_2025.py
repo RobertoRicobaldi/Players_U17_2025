@@ -29,7 +29,10 @@ EXPORTS_DIR = os.path.join(DATA_DIR, "exports")
 for d in (FLAGS_DIR, PHOTOS_DIR, EXPORTS_DIR):
     os.makedirs(d, exist_ok=True)
 
-EXCEL_DEFAULT = "Players U17 World Cup Marruecos 2025.xlsx"
+# Excel del repo (misma carpeta que el .py)
+EXCEL_DEFAULT   = "Players U17 World Cup Marruecos 2025.xlsx"
+APP_DIR         = os.path.dirname(os.path.abspath(__file__))
+EXCEL_PATH_REPO = os.path.join(APP_DIR, EXCEL_DEFAULT)
 
 
 def st_plot(fig, key: str):
@@ -379,6 +382,30 @@ _migrate_add_managers()
 def fetch_df(query: str, params: Tuple = ()):
     return pd.read_sql_query(query, conn, params=params)
 
+# ====== Bootstrap automático en servidor (primera vez) ======
+def _bootstrap_if_needed():
+    try:
+        # 1) Managers y calendario si faltan
+        ct_teams = int(fetch_df("SELECT COUNT(*) AS c FROM teams").iloc[0]["c"])
+        if ct_teams == 0:
+            seed_managers_fixed()
+        ct_matches = int(fetch_df("SELECT COUNT(*) AS c FROM matches").iloc[0]["c"])
+        if ct_matches == 0:
+            seed_official_matches(replace_all=True)
+
+        # 2) Jugadoras 2025 desde el Excel del repo, si aún no hay
+        ct_players_2025 = int(fetch_df(
+            "SELECT COUNT(*) AS c FROM player_tournaments WHERE tournament_year=2025"
+        ).iloc[0]["c"])
+        if ct_players_2025 == 0 and os.path.exists(EXCEL_PATH_REPO):
+            import_players_from_excel(EXCEL_PATH_REPO)
+            clear_caches()
+    except Exception:
+        # No bloqueamos la app si algo falla al bootstrapear
+        pass
+
+_bootstrap_if_needed()
+
 @st.cache_data(show_spinner=False)
 def list_teams() -> pd.DataFrame:
     return fetch_df("SELECT * FROM teams ORDER BY name")
@@ -408,7 +435,16 @@ def compact_team_duplicates() -> int:
     return 0
 
 def clear_caches():
-    list_teams.clear(); list_matches.clear(); list_evaluations.clear(); list_players_2025.clear()
+    try: list_teams.clear()
+    except Exception: pass
+    try: list_matches.clear()
+    except Exception: pass
+    try: list_evaluations.clear()
+    except Exception: pass
+    # Puede que aún no exista si se llama en el bootstrap muy pronto
+    try: list_players_2025.clear()
+    except Exception: pass
+
 
 # ========= HELPERS 2025 =========
 @st.cache_data(show_spinner=False)
@@ -867,7 +903,6 @@ with tabs[0]:
     with c1:
         if st.button("Cargar/actualizar MANAGERS fijos (24)", use_container_width=True):
             seed_managers_fixed()
-            # Evita que el select conserve una selección inválida tras cambiar la tabla
             st.session_state.pop("mgr_team_sel", None)
             clear_caches()
             st.success("Managers guardados.")
@@ -920,7 +955,35 @@ with tabs[0]:
         clear_caches()
         st.success("Actualizado.")
 
+    # ---------- Importar jugadoras dentro de Admin ----------
+    st.divider()
+    st.subheader("Importar jugadoras desde Excel")
 
+    colA, colB = st.columns([1, 1])
+
+    with colA:
+        st.caption(f"Excel del repo: **{os.path.basename(EXCEL_PATH_REPO)}**")
+        if os.path.exists(EXCEL_PATH_REPO):
+            if st.button("📥 Importar del Excel del repo", use_container_width=True):
+                n = import_players_from_excel(EXCEL_PATH_REPO)
+                clear_caches()
+                st.success(f"Importadas/actualizadas {n} jugadoras desde el Excel del repo.")
+        else:
+            st.warning("No se encontró el Excel en el repositorio (sube el .xlsx al repo).")
+
+    with colB:
+        up = st.file_uploader("…o súbelo manualmente (.xlsx)", type=["xlsx"])
+        if up is not None:
+            tmp_dir = os.path.join(DATA_DIR, "uploads")
+            os.makedirs(tmp_dir, exist_ok=True)
+            tmp_path = os.path.join(tmp_dir, "players_import.xlsx")
+            with open(tmp_path, "wb") as f:
+                f.write(up.getbuffer())
+            n = import_players_from_excel(tmp_path)
+            clear_caches()
+            st.success(f"Importadas/actualizadas {n} jugadoras desde el archivo subido.")
+
+    # este divider VA al nivel de Admin, no dentro de colB
     st.divider()
     st.write("**Selecciones (Mundial 2025)**")
     view = tdf[["name","manager"]].copy().rename(columns={"name":"Selección","manager":"Entrenador/a"})

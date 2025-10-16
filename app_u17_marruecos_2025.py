@@ -1308,21 +1308,22 @@ with tabs[5]:
 with tabs[6]:
     st.subheader("Campograma global — Destacadas 2025 (banderas)")
 
-    # constantes de estética
-    FLAG_W_FIELD = 6.0   # ancho bandera dentro del campo (unidades de campo, antes era más grande)
-    FLAG_H_FIELD = 4.0   # alto  "
-    NAME_DX      = 3.0   # desplazamiento extra del nombre a la derecha, para no pisar la bandera
+    # --- tamaños/espaciados dentro del campo ---
+    FLAG_W_FIELD = 6.0    # ancho de la bandera en unidades del campo
+    FLAG_H_FIELD = 4.0    # alto de la bandera
+    NAME_DX      = 3.0    # desplazamiento del nombre a la derecha de la bandera
 
-    LEGEND_X0    = 109.0  # x del lateral derecho (fuera del campo)
-    LEGEND_FLAG_W = 4.0
-    LEGEND_FLAG_H = 3.0
-    LEGEND_TEXT_DX = 3.0  # desplazamiento del texto respecto a la bandera en la leyenda
+    # banderas como DATA-URI (evita problemas en iOS/Safari)
+    def team_flag_data_uri(team: str, px: int = 80) -> Optional[str]:
+        # intenta cache local -> base64; si no, cae a CDN (último recurso)
+        p = ensure_flag_png(team, size=px)
+        if p:
+            uri = _file_to_data_uri(p)
+            if uri:
+                return uri
+        return flag_url_cdn(team, size=px)
 
-    def team_flag_url(name: str, px: int = 64) -> str:
-        # usa el helper existente; si no hay, devuelve None y se omite
-        return flag_url_cdn(name, size=px)
-
-    # sólo jugadoras DESTACADAS
+    # solo jugadoras DESTACADAS
     df_all = fetch_df("""
         SELECT p.id, p.name, p.position, t.name as team_name,
                AVG(COALESCE(e.final_score, e.rating)) as media
@@ -1336,7 +1337,6 @@ with tabs[6]:
     if df_all.empty:
         st.info("Sin destacadas todavía.")
     else:
-        # mapeo a coordenadas del campo
         rows = []
         for _, r in df_all.iterrows():
             posg = map_pos_group(r.get("position") or "")
@@ -1354,7 +1354,7 @@ with tabs[6]:
         fig = go.Figure()
         add_pitch_background(fig)
 
-        # puntos invisibles solo para hover (nos ayudan a colocar textos)
+        # puntos invisibles para hover (no afectan al dibujo)
         fig.add_trace(go.Scatter(
             x=gdf["x"], y=gdf["y"], mode="markers",
             marker=dict(size=1, opacity=0),
@@ -1368,25 +1368,24 @@ with tabs[6]:
             showlegend=False
         ))
 
-        # 1) banderas y nombres dentro del campo (sólo destacadas)
+        # bandera + apellido a la derecha (dentro del campo)
         for _, r in gdf.iterrows():
-            fx = r["x"] - FLAG_W_FIELD/2
-            fy = r["y"] + FLAG_H_FIELD/2
-            flag_src = team_flag_url(str(r["team_name"]), px=64)
-
+            # bandera (como imagen base64 para iOS)
+            flag_src = team_flag_data_uri(str(r["team_name"]), px=80)
             if flag_src:
                 fig.add_layout_image(
                     dict(
                         source=flag_src,
                         xref="x", yref="y",
-                        x=fx, y=fy,
+                        x=r["x"] - FLAG_W_FIELD/2,
+                        y=r["y"] + FLAG_H_FIELD/2,
                         sizex=FLAG_W_FIELD, sizey=FLAG_H_FIELD,
                         xanchor="left", yanchor="top",
                         layer="above"
                     )
                 )
 
-            # nombre (apellido) desplazado a la derecha para no pisar la bandera
+            # apellido desplazado a la derecha para no pisar la bandera
             last = str(r["name"]).split(" ")[-1].upper()
             fig.add_annotation(
                 x=r["x"] + FLAG_W_FIELD/2 + NAME_DX,
@@ -1398,44 +1397,12 @@ with tabs[6]:
                 bgcolor="rgba(255,255,255,0)"
             )
 
-        # 2) leyenda lateral (bandera + nombre del país)
-        # repartimos verticalmente los países a lo largo del lateral
-        teams_unique = (
-            gdf[["team_name", "y"]]
-            .groupby("team_name", as_index=False)["y"].mean()
-            .sort_values("y")  # orden por posición media en el campo
-        )
-        if not teams_unique.empty:
-            ys = np.linspace(64, 6, len(teams_unique))  # de arriba a abajo
-            for (team, _), y_leg in zip(teams_unique.values, ys):
-                flag_src = team_flag_url(str(team), px=40)
-                if flag_src:
-                    fig.add_layout_image(
-                        dict(
-                            source=flag_src,
-                            xref="x", yref="y",
-                            x=LEGEND_X0, y=y_leg + LEGEND_FLAG_H/2,
-                            sizex=LEGEND_FLAG_W, sizey=LEGEND_FLAG_H,
-                            xanchor="left", yanchor="top",
-                            layer="above"
-                        )
-                    )
-                fig.add_annotation(
-                    x=LEGEND_X0 + LEGEND_FLAG_W + LEGEND_TEXT_DX,
-                    y=y_leg,
-                    text=f"<b>{team}</b>",
-                    showarrow=False,
-                    xanchor="left", yanchor="middle",
-                    font=dict(size=12, color="black"),
-                    bgcolor="rgba(255,255,255,0)"
-                )
-
-        # ejes y layout (dejamos margen a la derecha para la leyenda)
-        fig.update_xaxes(range=[-2, 120], visible=False)
+        # límites del campo y márgenes
+        fig.update_xaxes(range=[-2, 107], visible=False)
         fig.update_yaxes(range=[-2, 70], visible=False)
         fig.update_layout(
             title="Campograma global — Destacadas 2025 (banderas)",
             height=560,
-            margin=dict(l=10, r=100, t=50, b=10)  # margen derecho para que no corte la leyenda
+            margin=dict(l=10, r=10, t=50, b=10)
         )
-        st_plot(fig, key="campoglobal_flags")
+        st_plot(fig, key="campoglobal_flags_iossafe")

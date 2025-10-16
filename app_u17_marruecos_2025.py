@@ -1306,15 +1306,9 @@ with tabs[5]:
 
 # ========== 🌍 Campograma global ==========
 with tabs[6]:
-    st.subheader("Campograma global — Destacadas 2025")
+    st.subheader("Campograma global — Destacadas 2025 (con banderas)")
 
-    # Color consistente por selección
-    def team_color(name: str) -> str:
-        base = sum(bytearray((name or '').encode("utf-8"))) % 360
-        r, g, b = colorsys.hsv_to_rgb(base/360.0, 0.55, 0.85)
-        return f"rgb({int(r*255)},{int(g*255)},{int(b*255)})"
-
-    # Solo jugadoras destacadas
+    # media de destacadas por jugadora (igual que antes)
     df_all = fetch_df("""
         SELECT p.id, p.name, p.position, p.birth_year, t.name as team_name,
                AVG(COALESCE(e.final_score, e.rating)) as media
@@ -1324,89 +1318,135 @@ with tabs[6]:
         WHERE e.is_featured=1
         GROUP BY p.id, p.name, p.position, t.name
     """)
+
     if df_all.empty:
         st.info("Sin destacadas todavía.")
     else:
-        # Coordenadas por grupo posicional
+        # --- construir dataframe con coordenadas de campo
         rows = []
         for _, r in df_all.iterrows():
             posg = map_pos_group(r.get("position") or "")
             x, y = POS_PITCH.get(posg or "", (52.5, 34))
             rows.append({
-                "name": r["name"],
-                "team_name": r["team_name"],
+                "player_id": int(r["id"]),
+                "name": str(r["name"]),
+                "team_name": str(r["team_name"]),
                 "pos_group": posg or "—",
-                "x": x, "y": y,
-                "birth_year": r.get("birth_year"),
+                "x": float(x), "y": float(y),
                 "media": float(r.get("media") or 0.0)
             })
         gdf = pd.DataFrame(rows)
 
+        # === FIGURA
         fig = go.Figure()
         add_pitch_background(fig)
 
-        # --- Puntos en el campo (sin etiquetas para evitar solapes)
-        for team, sub in gdf.groupby("team_name"):
-            c = team_color(str(team))
-            x = sub["x"].tolist()
-            y = sub["y"].tolist()
-            sizes = [12 + max(0, (m - 6)) * 2 for m in sub["media"].fillna(0)]
-            fig.add_trace(go.Scatter(
-                x=x, y=y, mode="markers",
-                marker=dict(size=sizes, color=c, line=dict(width=1, color="black")),
-                name=str(team), showlegend=False,
-                hovertext=[
-                    f"{nm} — {tm} — {pg} · {md:.2f}"
-                    for nm, tm, pg, md in zip(
-                        sub["name"], sub["team_name"], sub["pos_group"], sub["media"].fillna(0)
+        # 1) Colocamos banderas en lugar de puntos
+        #    El tamaño de la bandera escala con la media (base ~3.6 unidades de campo).
+        def size_from_media(m: float) -> float:
+            return max(2.8, 2.8 + (m - 6.0) * 0.9)  # en unidades de campo (x/y)
+
+        for _, r in gdf.iterrows():
+            src = flag_image_uri(r["team_name"], size=160)  # data-URI o CDN
+            siz = size_from_media(r["media"])
+            if src:
+                fig.add_layout_image(
+                    dict(
+                        source=src,
+                        x=r["x"], y=r["y"],
+                        xref="x", yref="y",
+                        sizex=siz, sizey=siz,
+                        xanchor="center", yanchor="middle",
+                        layer="above"
                     )
-                ],
-                hoverinfo="text"
-            ))
+                )
+            else:
+                # fallback: marcador si no tenemos bandera
+                fig.add_trace(go.Scatter(
+                    x=[r["x"]], y=[r["y"]],
+                    mode="markers",
+                    marker=dict(size=16, line=dict(width=1, color="black")),
+                    name=r["team_name"], showlegend=False,
+                    hoverinfo="skip"
+                ))
 
-        # --- Panel lateral derecho (punto + Selección — Jugadora)
-        panel_x_point = 114      # posición x del punto de color (fuera del campo)
-        panel_x_text  = 117      # posición x del texto
-        start_y = 64             # y inicial (arriba)
-        step_y  = 3.2            # separación entre líneas
+        # 2) Etiquetas anti-colisión junto a cada bandera (apellido en mayúsculas)
+        #    Ajustamos y de las etiquetas para no montarse entre sí dentro de cada selección.
+        label_xshift_px = 12
+        min_gap = 2.2  # separación vertical mínima (unidades de campo)
 
-        entries = gdf.sort_values(["team_name", "name"]).to_dict("records")
+        for team, sub in gdf.groupby("team_name"):
+            xs = sub["x"].tolist()
+            ys = sub["y"].tolist()
+            labels = [str(nm).split(" ")[-1].upper() for nm in sub["name"]]
 
-        y_cursor = start_y
-        for row in entries:
-            team = str(row["team_name"])
-            name = str(row["name"])
-            color = team_color(team)
+            order = np.argsort(ys)
+            y_adj = [None] * len(ys)
+            last = -1e9
+            for idx in order:
+                target = ys[idx]
+                if target < last + min_gap:
+                    target = last + min_gap
+                y_adj[idx] = target
+                last = target
 
-            # punto de color
-            fig.add_trace(go.Scatter(
-                x=[panel_x_point], y=[y_cursor], mode="markers",
-                marker=dict(size=10, color=color, line=dict(width=1, color="black")),
-                showlegend=False, hoverinfo="skip"
-            ))
-            # texto (Selección — Jugadora)
-            fig.add_annotation(
-                x=panel_x_text, y=y_cursor,
-                text=f"{team} — {name}",
-                showarrow=False, xanchor="left", yanchor="middle",
-                font=dict(size=12, color="black"), align="left",
-                bgcolor="rgba(255,255,255,0)"
-            )
-            y_cursor -= step_y
+            for xi, yi, lab in zip(xs, y_adj, labels):
+                fig.add_annotation(
+                    x=xi, y=yi,
+                    text=lab,
+                    showarrow=False,
+                    xanchor="left", yanchor="middle",
+                    xshift=label_xshift_px,
+                    font=dict(size=12, color="black"),
+                    bgcolor="rgba(255,255,255,0)"
+                )
 
-        # Ampliamos X para que quepa el panel
-        fig.update_xaxes(range=[-2, 135], visible=False)
+        # 3) Panel lateral derecho con bandera + selección + jugadora
+        #    Lo dibujamos en coordenadas de "paper" para que siempre quede ordenado.
+        #    Distribución vertical de arriba (0.90) a abajo (0.10).
+        side = gdf.sort_values(["team_name", "name"]).reset_index(drop=True)
+        n = len(side)
+        if n > 0:
+            y_top, y_bot = 0.90, 0.10
+            y_vals = np.linspace(y_top, y_bot, n)
+            for yi, (_, r) in zip(y_vals, side.iterrows()):
+                flag_src = flag_image_uri(r["team_name"], size=120)
+
+                # bandera
+                if flag_src:
+                    fig.add_layout_image(dict(
+                        source=flag_src,
+                        xref="paper", yref="paper",
+                        x=0.985, y=yi,
+                        sizex=0.035, sizey=0.06,  # tamaño relativo al lienzo
+                        xanchor="right", yanchor="middle",
+                        layer="above"
+                    ))
+                # texto (selección + jugadora)
+                fig.add_annotation(
+                    xref="paper", yref="paper",
+                    x=0.94, y=yi,
+                    text=f"<b>{r['team_name']}</b> — {r['name']}",
+                    showarrow=False,
+                    xanchor="right", yanchor="middle",
+                    align="right",
+                    font=dict(size=12),
+                    bgcolor="rgba(255,255,255,0)"
+                )
+
+        # 4) Ejes y layout
+        fig.update_xaxes(range=[-2, 112], visible=False)   # alargamos un poco para aire a la derecha
         fig.update_yaxes(range=[-2, 70], visible=False)
         fig.update_layout(
             title="Campograma global — Destacadas 2025",
-            height=560,
-            margin=dict(l=10, r=30, t=50, b=10)
+            height=620,
+            margin=dict(l=10, r=10, t=50, b=10)
         )
-        st_plot(fig, key="campoglobal")
+        st_plot(fig, key="campoglobal_flags")
 
-        # --- Exportar a PDF (opcional; requiere kaleido instalado) ---
+        # 5) Exportar a PDF (kaleido)
         try:
-            pdf_bytes = fig.to_image(format="pdf", width=1200, height=650, scale=2)
+            pdf_bytes = fig.to_image(format="pdf", width=1200, height=680, scale=2)
             st.download_button(
                 "⬇️ Exportar campograma global (PDF)",
                 data=pdf_bytes,

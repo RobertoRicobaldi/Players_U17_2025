@@ -1083,6 +1083,7 @@ with tabs[3]:
     if ev.empty:
         st.info("Aún no hay evaluaciones.")
     else:
+        # Tomamos la última valoración de cada jugadora y filtramos solo las marcadas como 'destacada'
         last_by_player = ev.sort_values("created_at").drop_duplicates(subset=["player_id"], keep="last")
         players = fetch_df("SELECT * FROM players")
         merged = last_by_player.merge(players, left_on="player_id", right_on="id", how="left")
@@ -1097,24 +1098,25 @@ with tabs[3]:
             prow = merged.iloc[names.index(pick)]
 
             pid = int(prow["player_id"])
-            # usa SIEMPRE los factores REALES de la última (coherente con destacadas)
-            labs, vals = _factors_last_for_player(pid)
 
+            # Radar: usa SIEMPRE los factores REALES de la última valoración
+            labs, vals = _factors_last_for_player(pid)
             if labs:
                 fig = go.Figure()
-                fig.add_trace(go.Scatterpolar(r=vals + [vals[0]], theta=labs + [labs[0]], fill="toself", name="Última"))
+                fig.add_trace(go.Scatterpolar(r=vals + [vals[0]], theta=labs + [labs[0]],
+                                              fill="toself", name="Última"))
                 fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 10])),
                                   height=420, margin=dict(l=10, r=10, t=10, b=10))
                 st_plot(fig, key=f"radar_feat_{pid}")
             else:
                 st.info("Sin ítems para el radar todavía.")
 
-            # Campograma: usa la posición declarada; si no hay, infiere por ítems de la última valoración
+            # Campograma: por posición declarada; si no hay, inferimos por ítems
             posg = map_pos_group(prow.get("position"))
             if not posg:
                 posg = infer_group_from_factors(labs) or "medios ofensivos"
-
-            st_plot(draw_pitch_and_point(posg, title=f"Campograma — {posg.title()}"), key=f"pitch_feat_{pid}")
+            st_plot(draw_pitch_and_point(posg, title=f"Campograma — {posg.title()}"),
+                    key=f"pitch_feat_{pid}")
 
             # columnas para acciones
             c1, c2, c3 = st.columns([1, 1, 1])
@@ -1142,7 +1144,7 @@ with tabs[3]:
                             except Exception:
                                 pdf_bytes = None
 
-                        st.toast(f"PDF listo: {fname}")  # notificación discreta
+                        st.toast(f"PDF listo: {fname}")
                         if pdf_bytes:
                             st.download_button(
                                 "⬇️ Descargar PDF",
@@ -1154,7 +1156,6 @@ with tabs[3]:
                             )
                         else:
                             st.warning("No se pudieron preparar los bytes del PDF para la descarga.")
-
 
             # ---------- Editar última valoración ----------
             with c2:
@@ -1207,6 +1208,34 @@ with tabs[3]:
                                 )
                             conn.commit(); clear_caches()
                             st.success("Actualizado.")
+
+            # ---------- Quitar de destacadas + Borrar última ----------
+            with c3:
+                st.subheader("Borrar / Quitar")
+                # Quitar de destacadas (todas las valoraciones de esa jugadora)
+                if st.button("Quitar de ⭐ Destacadas", use_container_width=True, key=f"unfeat_{pid}"):
+                    conn.execute("UPDATE evaluations SET is_featured=0 WHERE player_id=?", (pid,))
+                    conn.commit(); clear_caches()
+                    st.success("Quitada de destacadas.")
+
+                # Borrar definitivamente la última valoración
+                with st.expander("🗑️ Borrar última valoración (definitivo)"):
+                    st.caption("Elimina la última valoración y sus ítems. No se puede deshacer.")
+                    if st.button("Eliminar definitivamente", use_container_width=True, key=f"del_{pid}"):
+                        last = fetch_df(
+                            "SELECT id FROM evaluations WHERE player_id=? ORDER BY datetime(created_at) DESC LIMIT 1",
+                            (pid,)
+                        )
+                        if last.empty:
+                            st.info("No hay valoración para borrar.")
+                        else:
+                            eid = int(last.iloc[0]["id"])
+                            cur = conn.cursor()
+                            cur.execute("DELETE FROM evaluation_factors WHERE evaluation_id=?", (eid,))
+                            cur.execute("DELETE FROM evaluations WHERE id=?", (eid,))
+                            conn.commit(); clear_caches()
+                            st.success("Última valoración eliminada.")
+
 
 # ========== 🏅 Ranking ==========
 with tabs[4]:
@@ -1279,11 +1308,13 @@ with tabs[5]:
 with tabs[6]:
     st.subheader("Campograma global — Destacadas 2025")
 
+    # Color consistente por selección
     def team_color(name: str) -> str:
         base = sum(bytearray((name or '').encode("utf-8"))) % 360
         r, g, b = colorsys.hsv_to_rgb(base/360.0, 0.55, 0.85)
         return f"rgb({int(r*255)},{int(g*255)},{int(b*255)})"
 
+    # Solo jugadoras destacadas
     df_all = fetch_df("""
         SELECT p.id, p.name, p.position, p.birth_year, t.name as team_name,
                AVG(COALESCE(e.final_score, e.rating)) as media
@@ -1296,6 +1327,7 @@ with tabs[6]:
     if df_all.empty:
         st.info("Sin destacadas todavía.")
     else:
+        # Coordenadas por grupo posicional
         rows = []
         for _, r in df_all.iterrows():
             posg = map_pos_group(r.get("position") or "")
@@ -1313,22 +1345,16 @@ with tabs[6]:
         fig = go.Figure()
         add_pitch_background(fig)
 
-        # parámetros de etiquetado
-        label_xshift_px = 12   # desplazamiento horizontal del texto en píxeles
-        min_gap = 2.0          # separación vertical mínima (unidades del campo)
-
+        # --- Puntos en el campo (sin etiquetas para evitar solapes)
         for team, sub in gdf.groupby("team_name"):
             c = team_color(str(team))
             x = sub["x"].tolist()
             y = sub["y"].tolist()
-            labels = [str(nm).split(" ")[-1].upper() for nm in sub["name"]]
-
-            # puntos (misma estética)
-            sizes = [12 + max(0, (m - 6))*2 for m in sub["media"].fillna(0)]
+            sizes = [12 + max(0, (m - 6)) * 2 for m in sub["media"].fillna(0)]
             fig.add_trace(go.Scatter(
                 x=x, y=y, mode="markers",
                 marker=dict(size=sizes, color=c, line=dict(width=1, color="black")),
-                name=str(team), showlegend=True,
+                name=str(team), showlegend=False,
                 hovertext=[
                     f"{nm} — {tm} — {pg} · {md:.2f}"
                     for nm, tm, pg, md in zip(
@@ -1338,40 +1364,47 @@ with tabs[6]:
                 hoverinfo="text"
             ))
 
-            # anti-colisión vertical (ajusta y de las etiquetas)
-            order = np.argsort(y)
-            y_off = [None] * len(y)
-            last = -1e9
-            for idx in order:
-                target = y[idx]
-                if target < last + min_gap:
-                    target = last + min_gap
-                y_off[idx] = target
-                last = target
+        # --- Panel lateral derecho (punto + Selección — Jugadora)
+        panel_x_point = 114      # posición x del punto de color (fuera del campo)
+        panel_x_text  = 117      # posición x del texto
+        start_y = 64             # y inicial (arriba)
+        step_y  = 3.2            # separación entre líneas
 
-            # anotaciones: texto SIEMPRE a la derecha del punto (en píxeles)
-            for xi, yi_adj, lab in zip(x, y_off, labels):
-                fig.add_annotation(
-                    x=xi, y=yi_adj,
-                    text=lab,
-                    showarrow=False,
-                    xanchor="left", yanchor="middle",
-                    xshift=label_xshift_px,           # a la derecha del punto
-                    font=dict(size=12, color=c),
-                    align="left",
-                    bgcolor="rgba(255,255,255,0)"
-                )
+        entries = gdf.sort_values(["team_name", "name"]).to_dict("records")
 
-        fig.update_xaxes(range=[-2, 107], visible=False)
+        y_cursor = start_y
+        for row in entries:
+            team = str(row["team_name"])
+            name = str(row["name"])
+            color = team_color(team)
+
+            # punto de color
+            fig.add_trace(go.Scatter(
+                x=[panel_x_point], y=[y_cursor], mode="markers",
+                marker=dict(size=10, color=color, line=dict(width=1, color="black")),
+                showlegend=False, hoverinfo="skip"
+            ))
+            # texto (Selección — Jugadora)
+            fig.add_annotation(
+                x=panel_x_text, y=y_cursor,
+                text=f"{team} — {name}",
+                showarrow=False, xanchor="left", yanchor="middle",
+                font=dict(size=12, color="black"), align="left",
+                bgcolor="rgba(255,255,255,0)"
+            )
+            y_cursor -= step_y
+
+        # Ampliamos X para que quepa el panel
+        fig.update_xaxes(range=[-2, 135], visible=False)
         fig.update_yaxes(range=[-2, 70], visible=False)
         fig.update_layout(
             title="Campograma global — Destacadas 2025",
             height=560,
-            margin=dict(l=10, r=10, t=50, b=10)
+            margin=dict(l=10, r=30, t=50, b=10)
         )
         st_plot(fig, key="campoglobal")
 
-        # --- Exportar a PDF (necesita 'kaleido') ---
+        # --- Exportar a PDF (opcional; requiere kaleido instalado) ---
         try:
             pdf_bytes = fig.to_image(format="pdf", width=1200, height=650, scale=2)
             st.download_button(

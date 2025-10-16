@@ -1311,7 +1311,7 @@ with tabs[6]:
     # --- tamaños/espaciados dentro del campo ---
     FLAG_W_FIELD = 6.0    # ancho de la bandera en unidades del campo
     FLAG_H_FIELD = 4.0    # alto de la bandera
-    NAME_DX      = 3.0    # desplazamiento del nombre a la derecha de la bandera
+    NAME_DX      = 1.2    # desplazamiento del nombre a la derecha de la bandera
 
     # banderas como DATA-URI (evita problemas en iOS/Safari)
     def team_flag_data_uri(team: str, px: int = 80) -> Optional[str]:

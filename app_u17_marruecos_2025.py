@@ -1308,31 +1308,45 @@ with tabs[5]:
 with tabs[6]:
     st.subheader("Campograma global — Destacadas 2025 (banderas)")
 
-    # Sólo jugadoras marcadas como destacadas
+    # constantes de estética
+    FLAG_W_FIELD = 6.0   # ancho bandera dentro del campo (unidades de campo, antes era más grande)
+    FLAG_H_FIELD = 4.0   # alto  "
+    NAME_DX      = 3.0   # desplazamiento extra del nombre a la derecha, para no pisar la bandera
+
+    LEGEND_X0    = 109.0  # x del lateral derecho (fuera del campo)
+    LEGEND_FLAG_W = 4.0
+    LEGEND_FLAG_H = 3.0
+    LEGEND_TEXT_DX = 3.0  # desplazamiento del texto respecto a la bandera en la leyenda
+
+    def team_flag_url(name: str, px: int = 64) -> str:
+        # usa el helper existente; si no hay, devuelve None y se omite
+        return flag_url_cdn(name, size=px)
+
+    # sólo jugadoras DESTACADAS
     df_all = fetch_df("""
         SELECT p.id, p.name, p.position, t.name as team_name,
                AVG(COALESCE(e.final_score, e.rating)) as media
         FROM evaluations e
-        JOIN players p ON p.id = e.player_id
-        LEFT JOIN teams t ON t.id = p.team_id
-        WHERE e.is_featured = 1
+        JOIN players p ON p.id=e.player_id
+        LEFT JOIN teams t ON t.id=p.team_id
+        WHERE e.is_featured=1
         GROUP BY p.id, p.name, p.position, t.name
     """)
 
     if df_all.empty:
         st.info("Sin destacadas todavía.")
     else:
-        # Coordenadas por grupo posicional
+        # mapeo a coordenadas del campo
         rows = []
         for _, r in df_all.iterrows():
             posg = map_pos_group(r.get("position") or "")
             x, y = POS_PITCH.get(posg or "", (52.5, 34))
             rows.append({
-                "player_id": int(r["id"]),
-                "name": str(r["name"]),
-                "team_name": str(r["team_name"]),
+                "player_id": r["id"],
+                "name": r["name"],
+                "team_name": r["team_name"],
                 "pos_group": posg or "—",
-                "x": float(x), "y": float(y),
+                "x": x, "y": y,
                 "media": float(r.get("media") or 0.0)
             })
         gdf = pd.DataFrame(rows)
@@ -1340,120 +1354,88 @@ with tabs[6]:
         fig = go.Figure()
         add_pitch_background(fig)
 
-        # Tamaño de la bandera (en unidades del campo)
-        def size_from_media(m: float) -> float:
-            return max(3.2, 3.2 + (m - 6.0) * 1.0)
+        # puntos invisibles solo para hover (nos ayudan a colocar textos)
+        fig.add_trace(go.Scatter(
+            x=gdf["x"], y=gdf["y"], mode="markers",
+            marker=dict(size=1, opacity=0),
+            hovertext=[
+                f"{nm} — {tm} — {pg} · {md:.2f}"
+                for nm, tm, pg, md in zip(
+                    gdf["name"], gdf["team_name"], gdf["pos_group"], gdf["media"]
+                )
+            ],
+            hoverinfo="text",
+            showlegend=False
+        ))
 
-        # 1) Banderas en el campo
+        # 1) banderas y nombres dentro del campo (sólo destacadas)
         for _, r in gdf.iterrows():
-            src = flag_image_uri(r["team_name"], size=160)
-            siz = size_from_media(r["media"])
-            if src:
-                fig.add_layout_image(dict(
-                    source=src,
-                    x=r["x"], y=r["y"],
-                    xref="x", yref="y",
-                    sizex=siz, sizey=siz,
-                    xanchor="center", yanchor="middle",
-                    layer="above"
-                ))
-            else:
-                # Fallback si no llega la bandera
-                fig.add_trace(go.Scatter(
-                    x=[r["x"]], y=[r["y"]],
-                    mode="markers",
-                    marker=dict(size=16, line=dict(width=1, color="black")),
-                    name=r["team_name"], showlegend=False,
-                    hoverinfo="skip"
-                ))
+            fx = r["x"] - FLAG_W_FIELD/2
+            fy = r["y"] + FLAG_H_FIELD/2
+            flag_src = team_flag_url(str(r["team_name"]), px=64)
 
-        # 2) Etiquetas (apellido) con anticolisión y desplazamiento extra hacia la derecha
-        #    Subimos el desplazamiento en píxeles para no pisar la bandera.
-        base_xshift_px = 28  # antes 12–14
-        min_gap = 2.2        # separación mínima vertical (unidades del campo)
+            if flag_src:
+                fig.add_layout_image(
+                    dict(
+                        source=flag_src,
+                        xref="x", yref="y",
+                        x=fx, y=fy,
+                        sizex=FLAG_W_FIELD, sizey=FLAG_H_FIELD,
+                        xanchor="left", yanchor="top",
+                        layer="above"
+                    )
+                )
 
-        for team, sub in gdf.groupby("team_name"):
-            xs = sub["x"].tolist()
-            ys = sub["y"].tolist()
-            labels = [str(nm).split(" ")[-1].upper() for nm in sub["name"]]
+            # nombre (apellido) desplazado a la derecha para no pisar la bandera
+            last = str(r["name"]).split(" ")[-1].upper()
+            fig.add_annotation(
+                x=r["x"] + FLAG_W_FIELD/2 + NAME_DX,
+                y=r["y"],
+                text=last,
+                showarrow=False,
+                xanchor="left", yanchor="middle",
+                font=dict(size=12, color="black"),
+                bgcolor="rgba(255,255,255,0)"
+            )
 
-            # Ordenar por Y y separar
-            order = np.argsort(ys)
-            y_adj = [None] * len(ys)
-            last = -1e9
-            for idx in order:
-                target = ys[idx]
-                if target < last + min_gap:
-                    target = last + min_gap
-                y_adj[idx] = target
-                last = target
-
-            # Etiquetas
-            for xi, yi, lab in zip(xs, y_adj, labels):
+        # 2) leyenda lateral (bandera + nombre del país)
+        # repartimos verticalmente los países a lo largo del lateral
+        teams_unique = (
+            gdf[["team_name", "y"]]
+            .groupby("team_name", as_index=False)["y"].mean()
+            .sort_values("y")  # orden por posición media en el campo
+        )
+        if not teams_unique.empty:
+            ys = np.linspace(64, 6, len(teams_unique))  # de arriba a abajo
+            for (team, _), y_leg in zip(teams_unique.values, ys):
+                flag_src = team_flag_url(str(team), px=40)
+                if flag_src:
+                    fig.add_layout_image(
+                        dict(
+                            source=flag_src,
+                            xref="x", yref="y",
+                            x=LEGEND_X0, y=y_leg + LEGEND_FLAG_H/2,
+                            sizex=LEGEND_FLAG_W, sizey=LEGEND_FLAG_H,
+                            xanchor="left", yanchor="top",
+                            layer="above"
+                        )
+                    )
                 fig.add_annotation(
-                    x=xi, y=yi,
-                    text=lab,
+                    x=LEGEND_X0 + LEGEND_FLAG_W + LEGEND_TEXT_DX,
+                    y=y_leg,
+                    text=f"<b>{team}</b>",
                     showarrow=False,
                     xanchor="left", yanchor="middle",
-                    xshift=base_xshift_px,          # más separación respecto a la bandera
                     font=dict(size=12, color="black"),
                     bgcolor="rgba(255,255,255,0)"
                 )
 
-        # 3) Panel lateral derecho: bandera + nombre del país (sin nombres de jugadoras)
-        side = (
-            gdf[["team_name"]]
-            .drop_duplicates()
-            .sort_values("team_name")
-            .reset_index(drop=True)
-        )
-        n = len(side)
-        if n > 0:
-            y_top, y_bot = 0.90, 0.12
-            y_vals = np.linspace(y_top, y_bot, n)
-            for yi, (_, r) in zip(y_vals, side.iterrows()):
-                flag_src = flag_image_uri(r["team_name"], size=140)
-
-                # Bandera en el borde derecho
-                if flag_src:
-                    fig.add_layout_image(dict(
-                        source=flag_src,
-                        xref="paper", yref="paper",
-                        x=0.985, y=yi,                 # pegada a la derecha
-                        sizex=0.035, sizey=0.06,
-                        xanchor="right", yanchor="middle",
-                        layer="above"
-                    ))
-                # Texto del país a la derecha de la bandera
-                fig.add_annotation(
-                    xref="paper", yref="paper",
-                    x=0.988, y=yi,
-                    text=f"<b>{r['team_name']}</b>",
-                    showarrow=False,
-                    xanchor="left", yanchor="middle",
-                    font=dict(size=12),
-                    bgcolor="rgba(255,255,255,0)"
-                )
-
-        # 4) Layout
-        fig.update_xaxes(range=[-2, 112], visible=False)  # ampliamos margen derecho para el panel
+        # ejes y layout (dejamos margen a la derecha para la leyenda)
+        fig.update_xaxes(range=[-2, 120], visible=False)
         fig.update_yaxes(range=[-2, 70], visible=False)
         fig.update_layout(
-            title="Campograma global — Destacadas 2025",
-            height=620,
-            margin=dict(l=10, r=10, t=50, b=10)
+            title="Campograma global — Destacadas 2025 (banderas)",
+            height=560,
+            margin=dict(l=10, r=100, t=50, b=10)  # margen derecho para que no corte la leyenda
         )
-        st_plot(fig, key="campoglobal_flags_onlycountries")
-
-        # 5) Exportar PDF (kaleido)
-        try:
-            pdf_bytes = fig.to_image(format="pdf", width=1200, height=680, scale=2)
-            st.download_button(
-                "⬇️ Exportar campograma global (PDF)",
-                data=pdf_bytes,
-                file_name="campograma_global_2025.pdf",
-                mime="application/pdf",
-                use_container_width=True
-            )
-        except Exception:
-            st.info("Para exportar a PDF instala 'kaleido' (pip install kaleido).")
+        st_plot(fig, key="campoglobal_flags")

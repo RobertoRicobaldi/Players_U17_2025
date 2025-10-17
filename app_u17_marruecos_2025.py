@@ -914,7 +914,6 @@ tabs = st.tabs(["🛠️ Admin", "📅 Partidos", "⚡ Valoración", "⭐ Destac
 
 # ========== 🛠️ Admin ==========
 with tabs[0]:
-    # --- Admin: edición de manager y notas (móvil friendly) ---
     st.subheader("Datos base")
     c1, c2, c3, c4 = st.columns(4)
 
@@ -927,33 +926,32 @@ with tabs[0]:
 
     with c2:
         if st.button("Rellenar managers vacíos con los fijos", use_container_width=True):
-            # Para cualquier selección oficial con manager vacío, poner el de MANAGERS_FIXED
-            cur = conn.cursor()
-            # Asegura columna notas por si aún no existe
+            # Asegura la columna de notas
             try:
-                cur.execute("ALTER TABLE teams ADD COLUMN manager_notes TEXT;")
+                conn.execute("ALTER TABLE teams ADD COLUMN manager_notes TEXT;")
                 conn.commit()
             except Exception:
                 pass
 
+            cur = conn.cursor()
             for team, mgr in MANAGERS_FIXED.items():
                 t = normalize_team_name(team)
-                # Si no existe el equipo, lo crea; si existe sin manager, lo rellena
                 cur.execute("INSERT OR IGNORE INTO teams(name, manager) VALUES (?,?)", (t, mgr))
                 cur.execute("""
-                    UPDATE teams SET manager = COALESCE(NULLIF(manager,''), ?)
+                    UPDATE teams
+                    SET manager = COALESCE(NULLIF(manager,''), ?)
                     WHERE name = ?
                 """, (mgr, t))
             conn.commit()
             clear_caches()
-            st.success("Managers vacíos rellenados.")
+            st.success("Managers vacíos rellenados con los fijos.")
 
     with c3:
         if st.button("Reemplazar calendario oficial (sólo estos)", use_container_width=True):
             seed_official_matches(replace_all=True)
             st.session_state.pop("mgr_team_sel", None)
             clear_caches()
-            st.success("Calendario oficial cargado (y anteriores eliminados).")
+            st.success("Calendario oficial cargado (anteriores eliminados).")
 
     with c4:
         if st.button("Compactar equipos duplicados", use_container_width=True):
@@ -964,7 +962,7 @@ with tabs[0]:
 
     st.markdown("— Edita **manager** y (opcional) **notas** por selección:")
 
-    # Traemos equipos (sólo las 24 selecciones oficiales) y deduplicamos por nombre
+    # Traer equipos oficiales y deduplicar por nombre
     tdf_raw = list_teams().copy()
     tdf = tdf_raw[tdf_raw["name"].isin(OFFICIAL_TEAMS)].copy()
     if not tdf.empty:
@@ -972,7 +970,7 @@ with tabs[0]:
         tdf = (
             tdf.sort_values(["_k", "id"])
                .drop_duplicates(subset=["_k"], keep="last")
-               .drop(columns=["_k"])
+               .drop(columns=["_k"])        # <- corregido
                .sort_values("name")
         )
 
@@ -986,22 +984,33 @@ with tabs[0]:
         ser = df.loc[df["name"] == name, col]
         return str(ser.iloc[0]) if not ser.empty and pd.notna(ser.iloc[0]) else ""
 
-    # Manager actual: si en BD está vacío, usar el del listado fijo como fallback visual
-    db_mgr   = _safe_col(tdf, tname, "manager")
-    cur_mgr  = db_mgr if db_mgr else MANAGERS_FIXED.get(tname, "")
-    # Notas actuales (si no existe la columna, queda "")
+    # Manager y notas actuales en BD
+    db_mgr    = _safe_col(tdf, tname, "manager")
+    cur_mgr   = db_mgr if db_mgr else MANAGERS_FIXED.get(tname, "")  # fallback al fijo
     cur_notes = _safe_col(tdf, tname, "manager_notes")
 
+    # Claves DINÁMICAS por selección para que Streamlit no arrastre el valor del equipo anterior
+    mgr_key   = f"mgr_name_edit::{tname}"
+    notes_key = f"mgr_notes_edit::{tname}"
+
+    # Inicializa estado al cambiar de selección
+    if tname:
+        if mgr_key not in st.session_state:
+            st.session_state[mgr_key] = cur_mgr
+        if notes_key not in st.session_state:
+            st.session_state[notes_key] = cur_notes
+
     # Entradas de edición
-    new_mgr = st.text_input("Entrenador/a", value=cur_mgr, key="mgr_name_edit")
+    new_mgr = st.text_input("Entrenador/a", value=st.session_state.get(mgr_key, cur_mgr), key=mgr_key)
     new_notes = st.text_area(
         "Notas del seleccionador/a (opcional)",
-        value=cur_notes, height=140, key="mgr_notes_edit",
+        value=st.session_state.get(notes_key, cur_notes),
+        height=140, key=notes_key,
         placeholder="Ej.: reunión prevista, estilo de juego, necesidades de perfiles, etc."
     )
 
     # Botones guardar / limpiar / exportar CSV de notas
-    save_cols = st.columns([1,1,2,2])
+    save_cols = st.columns([1, 1, 2])
     with save_cols[0]:
         if st.button("💾 Guardar", use_container_width=True, disabled=not bool(tname)):
             # Garantiza columna manager_notes
@@ -1010,8 +1019,10 @@ with tabs[0]:
                 conn.commit()
             except Exception:
                 pass
-            conn.execute("UPDATE teams SET manager=?, manager_notes=? WHERE name=?",
-                         (new_mgr.strip(), new_notes.strip(), tname))
+            conn.execute(
+                "UPDATE teams SET manager=?, manager_notes=? WHERE name=?",
+                (st.session_state[mgr_key].strip(), st.session_state[notes_key].strip(), tname)
+            )
             conn.commit()
             clear_caches()
             st.success("Datos de la selección actualizados.")
@@ -1027,15 +1038,14 @@ with tabs[0]:
                     conn.commit()
                 clear_caches()
                 st.success("Notas borradas.")
-                st.session_state["mgr_notes_edit"] = ""
+                st.session_state[notes_key] = ""
             except Exception:
                 st.warning("No se pudieron limpiar las notas.")
 
     with save_cols[2]:
-        # Exportar CSV de (Sólo 24 oficiales) Selección · Entrenador/a · Notas
+        # Exportar CSV de (Sólo oficiales) Selección · Entrenador/a · Notas
         tdf_list = list_teams().copy()
         tdf_list = tdf_list[tdf_list["name"].isin(OFFICIAL_TEAMS)].copy()
-        # asegurar la columna manager_notes para la exportación
         if "manager_notes" not in tdf_list.columns:
             tdf_list["manager_notes"] = ""
         export_df = (
@@ -1043,10 +1053,9 @@ with tabs[0]:
             .rename(columns={"name":"Seleccion","manager":"Entrenador/a","manager_notes":"Notas"})
             .sort_values("Seleccion")
         )
-        csv_bytes = export_df.to_csv(index=False).encode("utf-8")
         st.download_button(
             "⬇️ Exportar notas (CSV)",
-            data=csv_bytes,
+            data=export_df.to_csv(index=False).encode("utf-8"),
             file_name="notas_seleccionadores.csv",
             mime="text/csv",
             use_container_width=True
@@ -1057,7 +1066,6 @@ with tabs[0]:
     st.subheader("Importar jugadoras desde Excel")
 
     colA, colB = st.columns([1, 1])
-
     with colA:
         st.caption(f"Excel del repo: **{os.path.basename(EXCEL_PATH_REPO)}**")
         if os.path.exists(EXCEL_PATH_REPO):
@@ -1084,7 +1092,6 @@ with tabs[0]:
     st.divider()
     st.write("**Selecciones (Mundial 2025)**")
 
-    # Relee para mostrar últimos cambios
     tdf_list = list_teams().copy()
     tdf_list = tdf_list[tdf_list["name"].isin(OFFICIAL_TEAMS)].copy()
     if not tdf_list.empty:
@@ -1092,17 +1099,15 @@ with tabs[0]:
         tdf_list = (
             tdf_list.sort_values(["_k", "id"])
                     .drop_duplicates(subset=["_k"], keep="last")
-                    .drop(columns(["_k"]))
+                    .drop(columns=["_k"])   # <- corregido
                     .sort_values("name")
         )
 
-    view = tdf_list[["name", "manager"]].copy()
-    view.rename(columns={"name":"Selección","manager":"Entrenador/a"}, inplace=True)
+    view = tdf_list[["name","manager"]].copy().rename(
+        columns={"name":"Selección","manager":"Entrenador/a"}
+    )
     view["Bandera"] = view["Selección"].apply(lambda n: flag_img_md(n, 20))
-
-    html = view[["Bandera","Selección","Entrenador/a"]].to_html(
-        escape=False, index=False
-    ).replace("NaN","")
+    html = view[["Bandera","Selección","Entrenador/a"]].to_html(escape=False, index=False).replace("NaN","")
     st.markdown(html, unsafe_allow_html=True)
 
 

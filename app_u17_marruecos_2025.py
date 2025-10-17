@@ -939,7 +939,7 @@ with tabs[0]:
             st.session_state.pop("mgr_team_sel", None)
             clear_caches()
 
-    st.markdown("— Edita **manager** y **notas** por selección (móvil friendly):")
+    st.markdown("— Edita **manager** y (opcional) **notas** por selección:")
 
     # Traemos equipos (sólo 24 oficiales) y deduplicamos por nombre
     tdf_raw = list_teams().copy()
@@ -956,27 +956,29 @@ with tabs[0]:
     options = tdf["name"].tolist() if not tdf.empty else []
     tname = st.selectbox("Selección", options=options, key="mgr_team_sel")
 
-    # Helpers seguros para leer manager y notas
-    def _safe_col(df, name: Optional[str], col: str) -> str:
+    # Helpers seguros para leer manager y notas (si la columna no existe, devuelve "")
+    def _safe_col(df: pd.DataFrame, name: Optional[str], col: str) -> str:
         if df.empty or not name or col not in df.columns:
             return ""
         ser = df.loc[df["name"] == name, col]
         return str(ser.iloc[0]) if not ser.empty and pd.notna(ser.iloc[0]) else ""
 
     cur_mgr   = _safe_col(tdf, tname, "manager")
-    cur_notes = _safe_col(tdf, tname, "manager_notes")  # puede no existir en BD antigua, lo cubre la migración
+    cur_notes = _safe_col(tdf, tname, "manager_notes")  # si no existe, queda ""
 
     # Entradas de edición
     new_mgr = st.text_input("Entrenador/a", value=cur_mgr, key="mgr_name_edit")
-    new_notes = st.text_area("Notas del seleccionador/a (comentarios de reuniones, ideas clave, etc.)",
-                             value=cur_notes, height=140, key="mgr_notes_edit",
-                             placeholder="Ej.: Tendremos amistoso en septiembre; prioriza perfiles rápidos por banda; ...")
+    new_notes = st.text_area(
+        "Notas del seleccionador/a (opcional)",
+        value=cur_notes, height=140, key="mgr_notes_edit",
+        placeholder="Ej.: reunión prevista, estilo de juego, necesidades de perfiles, etc."
+    )
 
-    # Guardado
+    # Botones guardar/limpiar
     save_cols = st.columns([1,1,2])
     with save_cols[0]:
         if st.button("💾 Guardar", use_container_width=True, disabled=not bool(tname)):
-            # Asegura que la columna manager_notes existe (por si entramos antes de que la migración haya corrido)
+            # Garantiza que la columna manager_notes exista (por si la BD aún no migró)
             try:
                 conn.execute("ALTER TABLE teams ADD COLUMN manager_notes TEXT;")
                 conn.commit()
@@ -991,14 +993,20 @@ with tabs[0]:
     with save_cols[1]:
         if st.button("🧹 Limpiar notas", use_container_width=True, disabled=not bool(tname)):
             try:
-                conn.execute("UPDATE teams SET manager_notes=NULL WHERE name=?", (tname,))
-                conn.commit()
+                # Si no existe la columna, no hace nada
+                cur = conn.cursor()
+                cur.execute("PRAGMA table_info(teams);")
+                cols = [r[1] for r in cur.fetchall()]
+                if "manager_notes" in cols:
+                    conn.execute("UPDATE teams SET manager_notes=NULL WHERE name=?", (tname,))
+                    conn.commit()
                 clear_caches()
                 st.success("Notas borradas.")
-                st.session_state["mgr_notes_edit"] = ""  # limpia el textarea
+                st.session_state["mgr_notes_edit"] = ""
             except Exception:
                 st.warning("No se pudieron limpiar las notas.")
 
+    # ---------- Importar jugadoras dentro de Admin ----------
     st.divider()
     st.subheader("Importar jugadoras desde Excel")
 
@@ -1026,7 +1034,7 @@ with tabs[0]:
             clear_caches()
             st.success(f"Importadas/actualizadas {n} jugadoras desde el archivo subido.")
 
-    # Listado con banderas, manager y vista previa de notas
+    # --- Listado como antes: Bandera · Selección · Entrenador/a ---
     st.divider()
     st.write("**Selecciones (Mundial 2025)**")
 
@@ -1042,28 +1050,17 @@ with tabs[0]:
                     .sort_values("name")
         )
 
-    view = tdf_list[["name","manager","manager_notes"]].copy()
-    view.rename(columns={
-        "name":"Selección",
-        "manager":"Entrenador/a",
-        "manager_notes":"Notas (preview)"
-    }, inplace=True)
+    view = tdf_list[["name", "manager"]].copy()  # <- sólo estas columnas (como antes)
+    view.rename(columns={"name":"Selección","manager":"Entrenador/a"}, inplace=True)
 
     # Bandera
     view["Bandera"] = view["Selección"].apply(lambda n: flag_img_md(n, 20))
-    # Vista previa de notas (primera línea / 120 chars)
-    def _preview(s: Optional[str]) -> str:
-        if not isinstance(s, str) or not s.strip():
-            return ""
-        s1 = s.strip().splitlines()[0]
-        return (s1[:117] + "…") if len(s1) > 120 else s1
 
-    view["Notas (preview)"] = view["Notas (preview)"].apply(_preview)
-
-    html = view[["Bandera","Selección","Entrenador/a","Notas (preview)"]].to_html(
+    html = view[["Bandera","Selección","Entrenador/a"]].to_html(
         escape=False, index=False
     ).replace("NaN","")
     st.markdown(html, unsafe_allow_html=True)
+
 
 
 # ========== Partidos ==========

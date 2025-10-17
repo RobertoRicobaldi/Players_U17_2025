@@ -916,23 +916,46 @@ tabs = st.tabs(["🛠️ Admin", "📅 Partidos", "⚡ Valoración", "⭐ Destac
 with tabs[0]:
     # --- Admin: edición de manager y notas (móvil friendly) ---
     st.subheader("Datos base")
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
 
     with c1:
         if st.button("Cargar/actualizar MANAGERS fijos (24)", use_container_width=True):
             seed_managers_fixed()
             st.session_state.pop("mgr_team_sel", None)
             clear_caches()
-            st.success("Managers guardados.")
+            st.success("Managers fijos cargados/actualizados.")
 
     with c2:
+        if st.button("Rellenar managers vacíos con los fijos", use_container_width=True):
+            # Para cualquier selección oficial con manager vacío, poner el de MANAGERS_FIXED
+            cur = conn.cursor()
+            # Asegura columna notas por si aún no existe
+            try:
+                cur.execute("ALTER TABLE teams ADD COLUMN manager_notes TEXT;")
+                conn.commit()
+            except Exception:
+                pass
+
+            for team, mgr in MANAGERS_FIXED.items():
+                t = normalize_team_name(team)
+                # Si no existe el equipo, lo crea; si existe sin manager, lo rellena
+                cur.execute("INSERT OR IGNORE INTO teams(name, manager) VALUES (?,?)", (t, mgr))
+                cur.execute("""
+                    UPDATE teams SET manager = COALESCE(NULLIF(manager,''), ?)
+                    WHERE name = ?
+                """, (mgr, t))
+            conn.commit()
+            clear_caches()
+            st.success("Managers vacíos rellenados.")
+
+    with c3:
         if st.button("Reemplazar calendario oficial (sólo estos)", use_container_width=True):
             seed_official_matches(replace_all=True)
             st.session_state.pop("mgr_team_sel", None)
             clear_caches()
             st.success("Calendario oficial cargado (y anteriores eliminados).")
 
-    with c3:
+    with c4:
         if st.button("Compactar equipos duplicados", use_container_width=True):
             n = compact_team_duplicates()
             st.success(f"Compactados {n} duplicados.") if n else st.info("No había duplicados.")
@@ -941,7 +964,7 @@ with tabs[0]:
 
     st.markdown("— Edita **manager** y (opcional) **notas** por selección:")
 
-    # Traemos equipos (sólo 24 oficiales) y deduplicamos por nombre
+    # Traemos equipos (sólo las 24 selecciones oficiales) y deduplicamos por nombre
     tdf_raw = list_teams().copy()
     tdf = tdf_raw[tdf_raw["name"].isin(OFFICIAL_TEAMS)].copy()
     if not tdf.empty:
@@ -956,15 +979,18 @@ with tabs[0]:
     options = tdf["name"].tolist() if not tdf.empty else []
     tname = st.selectbox("Selección", options=options, key="mgr_team_sel")
 
-    # Helpers seguros para leer manager y notas (si la columna no existe, devuelve "")
+    # Helpers seguros
     def _safe_col(df: pd.DataFrame, name: Optional[str], col: str) -> str:
         if df.empty or not name or col not in df.columns:
             return ""
         ser = df.loc[df["name"] == name, col]
         return str(ser.iloc[0]) if not ser.empty and pd.notna(ser.iloc[0]) else ""
 
-    cur_mgr   = _safe_col(tdf, tname, "manager")
-    cur_notes = _safe_col(tdf, tname, "manager_notes")  # si no existe, queda ""
+    # Manager actual: si en BD está vacío, usar el del listado fijo como fallback visual
+    db_mgr   = _safe_col(tdf, tname, "manager")
+    cur_mgr  = db_mgr if db_mgr else MANAGERS_FIXED.get(tname, "")
+    # Notas actuales (si no existe la columna, queda "")
+    cur_notes = _safe_col(tdf, tname, "manager_notes")
 
     # Entradas de edición
     new_mgr = st.text_input("Entrenador/a", value=cur_mgr, key="mgr_name_edit")
@@ -974,11 +1000,11 @@ with tabs[0]:
         placeholder="Ej.: reunión prevista, estilo de juego, necesidades de perfiles, etc."
     )
 
-    # Botones guardar/limpiar
-    save_cols = st.columns([1,1,2])
+    # Botones guardar / limpiar / exportar CSV de notas
+    save_cols = st.columns([1,1,2,2])
     with save_cols[0]:
         if st.button("💾 Guardar", use_container_width=True, disabled=not bool(tname)):
-            # Garantiza que la columna manager_notes exista (por si la BD aún no migró)
+            # Garantiza columna manager_notes
             try:
                 conn.execute("ALTER TABLE teams ADD COLUMN manager_notes TEXT;")
                 conn.commit()
@@ -993,7 +1019,6 @@ with tabs[0]:
     with save_cols[1]:
         if st.button("🧹 Limpiar notas", use_container_width=True, disabled=not bool(tname)):
             try:
-                # Si no existe la columna, no hace nada
                 cur = conn.cursor()
                 cur.execute("PRAGMA table_info(teams);")
                 cols = [r[1] for r in cur.fetchall()]
@@ -1005,6 +1030,27 @@ with tabs[0]:
                 st.session_state["mgr_notes_edit"] = ""
             except Exception:
                 st.warning("No se pudieron limpiar las notas.")
+
+    with save_cols[2]:
+        # Exportar CSV de (Sólo 24 oficiales) Selección · Entrenador/a · Notas
+        tdf_list = list_teams().copy()
+        tdf_list = tdf_list[tdf_list["name"].isin(OFFICIAL_TEAMS)].copy()
+        # asegurar la columna manager_notes para la exportación
+        if "manager_notes" not in tdf_list.columns:
+            tdf_list["manager_notes"] = ""
+        export_df = (
+            tdf_list[["name","manager","manager_notes"]]
+            .rename(columns={"name":"Seleccion","manager":"Entrenador/a","manager_notes":"Notas"})
+            .sort_values("Seleccion")
+        )
+        csv_bytes = export_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇️ Exportar notas (CSV)",
+            data=csv_bytes,
+            file_name="notas_seleccionadores.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
 
     # ---------- Importar jugadoras dentro de Admin ----------
     st.divider()
@@ -1034,7 +1080,7 @@ with tabs[0]:
             clear_caches()
             st.success(f"Importadas/actualizadas {n} jugadoras desde el archivo subido.")
 
-    # --- Listado como antes: Bandera · Selección · Entrenador/a ---
+    # --- Listado (Bandera · Selección · Entrenador/a) ---
     st.divider()
     st.write("**Selecciones (Mundial 2025)**")
 
@@ -1046,21 +1092,18 @@ with tabs[0]:
         tdf_list = (
             tdf_list.sort_values(["_k", "id"])
                     .drop_duplicates(subset=["_k"], keep="last")
-                    .drop(columns=["_k"])
+                    .drop(columns(["_k"]))
                     .sort_values("name")
         )
 
-    view = tdf_list[["name", "manager"]].copy()  # <- sólo estas columnas (como antes)
+    view = tdf_list[["name", "manager"]].copy()
     view.rename(columns={"name":"Selección","manager":"Entrenador/a"}, inplace=True)
-
-    # Bandera
     view["Bandera"] = view["Selección"].apply(lambda n: flag_img_md(n, 20))
 
     html = view[["Bandera","Selección","Entrenador/a"]].to_html(
         escape=False, index=False
     ).replace("NaN","")
     st.markdown(html, unsafe_allow_html=True)
-
 
 
 # ========== Partidos ==========

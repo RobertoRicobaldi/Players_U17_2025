@@ -1079,59 +1079,127 @@ with tabs[2]:
 # ========== ⭐ Destacadas ==========
 with tabs[3]:
     st.subheader("Jugadoras destacadas")
+
     ev = list_evaluations()
     if ev.empty:
         st.info("Aún no hay evaluaciones.")
     else:
-        # Tomamos la última valoración de cada jugadora y filtramos solo las marcadas como 'destacada'
+        # Última evaluación por jugadora, manteniendo solo las que están marcadas como destacadas
         last_by_player = ev.sort_values("created_at").drop_duplicates(subset=["player_id"], keep="last")
-        players = fetch_df("SELECT * FROM players")
-        merged = last_by_player.merge(players, left_on="player_id", right_on="id", how="left")
+        players_df = fetch_df("SELECT * FROM players")
+        merged = last_by_player.merge(players_df, left_on="player_id", right_on="id", how="left")
         merged = merged[merged["is_featured"] == 1].copy()
 
         if merged.empty:
             st.info("No hay destacadas todavía.")
         else:
+            # --------- BOTÓN: Exportar CSV con destacadas + datos + ítems ----------
+            def _featured_csv_bytes() -> bytes:
+                # Base: columnas fijas
+                base_cols = [
+                    ("player_name", "jugadora"),
+                    ("team_name", "selección"),
+                    ("position", "posición"),
+                    ("birth_year", "año_nac"),
+                    ("height_cm", "altura_cm"),
+                    ("club", "club"),
+                    ("rating", "rating"),
+                    ("final_score", "final_score"),
+                    ("created_at", "fecha_valoración"),
+                    ("comment", "comentario"),
+                ]
+
+                # Recolecta TODOS los ítems usados en las últimas valoraciones destacadas
+                eids = merged["id_x"].tolist() if "id_x" in merged.columns else merged["id"].tolist()
+                all_items = set()
+                per_eval_items = {}
+
+                for eid in eids:
+                    fdf = fetch_df("SELECT factor, score FROM evaluation_factors WHERE evaluation_id=?", (int(eid),))
+                    d = {str(r["factor"]).strip(): int(r["score"]) for _, r in fdf.iterrows()}
+                    per_eval_items[int(eid)] = d
+                    all_items.update(d.keys())
+
+                # Ordena los ítems alfabéticamente para columnas
+                item_cols = sorted(list(all_items))
+
+                # Construye filas
+                rows = []
+                for _, r in merged.iterrows():
+                    # id de la última evaluación (columna puede ser id_x si viene del merge)
+                    eid = int(r["id_x"] if "id_x" in r else r["id"])
+                    row = {}
+                    for src, dst in base_cols:
+                        row[dst] = r.get(src)
+                    # ítems → columnas
+                    fmap = per_eval_items.get(eid, {})
+                    for it in item_cols:
+                        row[it] = fmap.get(it, None)
+                    rows.append(row)
+
+                out = pd.DataFrame(rows, columns=[dst for _, dst in base_cols] + item_cols)
+                # CSV "Excel-friendly"
+                return out.to_csv(index=False).encode("utf-8-sig")
+
+            col_left, col_right = st.columns([1, 1], vertical_alignment="center")
+            with col_right:
+                try:
+                    csv_bytes = _featured_csv_bytes()
+                    fname = f"destacadas_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+                    st.download_button(
+                        "⬇️ Exportar destacadas (CSV)",
+                        data=csv_bytes,
+                        file_name=fname,
+                        mime="text/csv",
+                        use_container_width=True,
+                        key="dl_csv_featured",
+                    )
+                except Exception:
+                    st.warning("No se pudo generar el CSV de destacadas.")
+
+            # --------- UI de una destacada (igual que tenías) ----------
             merged = merged.sort_values("name")
             names = [f"{r['name']} — {r.get('position','') or ''}" for _, r in merged.iterrows()]
-            pick = st.selectbox("Selecciona destacada", options=names, key="feat_pick")
+            pick = col_left.selectbox("Selecciona destacada", options=names, key="feat_pick")
             prow = merged.iloc[names.index(pick)]
-
             pid = int(prow["player_id"])
 
-            # Radar: usa SIEMPRE los factores REALES de la última valoración
+            # Factores de la última valoración (para coherencia con destacadas)
             labs, vals = _factors_last_for_player(pid)
+
             if labs:
                 fig = go.Figure()
-                fig.add_trace(go.Scatterpolar(r=vals + [vals[0]], theta=labs + [labs[0]],
-                                              fill="toself", name="Última"))
-                fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 10])),
-                                  height=420, margin=dict(l=10, r=10, t=10, b=10))
+                fig.add_trace(go.Scatterpolar(
+                    r=vals + [vals[0]],
+                    theta=labs + [labs[0]],
+                    fill="toself",
+                    name="Última"
+                ))
+                fig.update_layout(
+                    polar=dict(radialaxis=dict(visible=True, range=[0, 10])),
+                    height=420, margin=dict(l=10, r=10, t=10, b=10)
+                )
                 st_plot(fig, key=f"radar_feat_{pid}")
             else:
                 st.info("Sin ítems para el radar todavía.")
 
-            # Campograma: por posición declarada; si no hay, inferimos por ítems
-            posg = map_pos_group(prow.get("position"))
-            if not posg:
-                posg = infer_group_from_factors(labs) or "medios ofensivos"
-            st_plot(draw_pitch_and_point(posg, title=f"Campograma — {posg.title()}"),
-                    key=f"pitch_feat_{pid}")
+            # Campograma: usa la posición declarada; si no hay, infiere por ítems
+            posg = map_pos_group(prow.get("position")) or infer_group_from_factors(labs) or "medios ofensivos"
+            st_plot(draw_pitch_and_point(posg, title=f"Campograma — {posg.title()}"), key=f"pitch_feat_{pid}")
 
-            # columnas para acciones
+            # --------- Acciones: Exportar PDF / Editar última / Quitar destacada ----------
             c1, c2, c3 = st.columns([1, 1, 1])
 
-            # ---------- Exportar PDF ----------
             def _safe_fname(s: str) -> str:
                 base = re.sub(r"[^A-Za-z0-9_-]+", "_", str(s).strip())
                 return base.strip("_") or "player"
 
+            # Exportar PDF
             with c1:
                 if st.button("📝 Exportar PDF", use_container_width=True, key=f"expdf_{pid}"):
                     os.makedirs(EXPORTS_DIR, exist_ok=True)
                     fname = f"{_safe_fname(prow['name'])}_U17_2025.pdf"
                     out_path = os.path.join(EXPORTS_DIR, fname)
-
                     res = export_player_pdf(pid, out_path)
                     if not res:
                         st.warning("No se pudo exportar el PDF.")
@@ -1143,7 +1211,6 @@ with tabs[3]:
                                     pdf_bytes = f.read()
                             except Exception:
                                 pdf_bytes = None
-
                         st.toast(f"PDF listo: {fname}")
                         if pdf_bytes:
                             st.download_button(
@@ -1157,7 +1224,7 @@ with tabs[3]:
                         else:
                             st.warning("No se pudieron preparar los bytes del PDF para la descarga.")
 
-            # ---------- Editar última valoración ----------
+            # Editar última valoración
             with c2:
                 with st.expander("✏️ Editar última valoración"):
                     last = fetch_df("""
@@ -1190,17 +1257,13 @@ with tabs[3]:
                                     f, [5, 7, 9], value=int(current.get(f, 7)),
                                     key=f"edit_{pid}_{i}"
                                 )
-
                         if st.button("💾 Guardar cambios", use_container_width=True, key=f"save_edit_{pid}"):
                             cur = conn.cursor()
                             cur.execute(
                                 "UPDATE evaluations SET rating=?, final_score=?, comment=? WHERE id=?",
                                 (int(rating_new), float(rating_new), comment_new, int(le["id"]))
                             )
-                            cur.execute(
-                                "DELETE FROM evaluation_factors WHERE evaluation_id=?",
-                                (int(le["id"]),)
-                            )
+                            cur.execute("DELETE FROM evaluation_factors WHERE evaluation_id=?", (int(le["id"]),))
                             for k, v in newvals.items():
                                 cur.execute(
                                     "INSERT INTO evaluation_factors(evaluation_id, factor, score) VALUES (?,?,?)",
@@ -1209,32 +1272,22 @@ with tabs[3]:
                             conn.commit(); clear_caches()
                             st.success("Actualizado.")
 
-            # ---------- Quitar de destacadas + Borrar última ----------
+            # Quitar destacada
             with c3:
-                st.subheader("Borrar / Quitar")
-                # Quitar de destacadas (todas las valoraciones de esa jugadora)
-                if st.button("Quitar de ⭐ Destacadas", use_container_width=True, key=f"unfeat_{pid}"):
-                    conn.execute("UPDATE evaluations SET is_featured=0 WHERE player_id=?", (pid,))
+                st.caption("Quitar de destacadas")
+                if st.button("🗑️ Quitar ⭐", type="secondary", use_container_width=True, key=f"rm_feat_{pid}"):
+                    cur = conn.cursor()
+                    cur.execute("""
+                        UPDATE evaluations
+                        SET is_featured = 0
+                        WHERE player_id = ?
+                          AND datetime(created_at) = (
+                            SELECT MAX(datetime(created_at)) FROM evaluations WHERE player_id = ?
+                          )
+                    """, (pid, pid))
                     conn.commit(); clear_caches()
-                    st.success("Quitada de destacadas.")
+                    st.success("Se ha quitado de destacadas.")
 
-                # Borrar definitivamente la última valoración
-                with st.expander("🗑️ Borrar última valoración (definitivo)"):
-                    st.caption("Elimina la última valoración y sus ítems. No se puede deshacer.")
-                    if st.button("Eliminar definitivamente", use_container_width=True, key=f"del_{pid}"):
-                        last = fetch_df(
-                            "SELECT id FROM evaluations WHERE player_id=? ORDER BY datetime(created_at) DESC LIMIT 1",
-                            (pid,)
-                        )
-                        if last.empty:
-                            st.info("No hay valoración para borrar.")
-                        else:
-                            eid = int(last.iloc[0]["id"])
-                            cur = conn.cursor()
-                            cur.execute("DELETE FROM evaluation_factors WHERE evaluation_id=?", (eid,))
-                            cur.execute("DELETE FROM evaluations WHERE id=?", (eid,))
-                            conn.commit(); clear_caches()
-                            st.success("Última valoración eliminada.")
 
 
 # ========== 🏅 Ranking ==========

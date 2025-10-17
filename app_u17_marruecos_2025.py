@@ -912,9 +912,9 @@ def export_player_pdf(player_id: int, save_path: str) -> Optional[Tuple[str, byt
 st.title("Scouting U17 — Marruecos 2025")
 tabs = st.tabs(["🛠️ Admin", "📅 Partidos", "⚡ Valoración", "⭐ Destacadas", "🏅 Ranking", "📊 Radar & Campo", "🌍 Campograma global"])
 
-# ========== Admin ==========
+# ========== 🛠️ Admin ==========
 with tabs[0]:
-    # --- Admin: edición de manager segura ---
+    # --- Admin: edición de manager y notas (móvil friendly) ---
     st.subheader("Datos base")
     c1, c2, c3 = st.columns(3)
 
@@ -939,10 +939,10 @@ with tabs[0]:
             st.session_state.pop("mgr_team_sel", None)
             clear_caches()
 
-    st.markdown("— Edita **manager** manualmente (móvil friendly):")
-    tdf_raw = list_teams().copy()
+    st.markdown("— Edita **manager** y **notas** por selección (móvil friendly):")
 
-    # sólo las 24 selecciones oficiales + dedupe por nombre
+    # Traemos equipos (sólo 24 oficiales) y deduplicamos por nombre
+    tdf_raw = list_teams().copy()
     tdf = tdf_raw[tdf_raw["name"].isin(OFFICIAL_TEAMS)].copy()
     if not tdf.empty:
         tdf["_k"] = tdf["name"].astype(str).str.strip().str.casefold()
@@ -956,24 +956,49 @@ with tabs[0]:
     options = tdf["name"].tolist() if not tdf.empty else []
     tname = st.selectbox("Selección", options=options, key="mgr_team_sel")
 
-    # Manager actual (SAFE)
-    def _safe_manager(df: pd.DataFrame, name: Optional[str]) -> str:
-        if df.empty or not name:
+    # Helpers seguros para leer manager y notas
+    def _safe_col(df, name: Optional[str], col: str) -> str:
+        if df.empty or not name or col not in df.columns:
             return ""
-        col = df.loc[df["name"] == name, "manager"]
-        return str(col.iloc[0]) if not col.empty else ""
+        ser = df.loc[df["name"] == name, col]
+        return str(ser.iloc[0]) if not ser.empty and pd.notna(ser.iloc[0]) else ""
 
-    cur_mgr = _safe_manager(tdf, tname)
+    cur_mgr   = _safe_col(tdf, tname, "manager")
+    cur_notes = _safe_col(tdf, tname, "manager_notes")  # puede no existir en BD antigua, lo cubre la migración
+
+    # Entradas de edición
     new_mgr = st.text_input("Entrenador/a", value=cur_mgr, key="mgr_name_edit")
+    new_notes = st.text_area("Notas del seleccionador/a (comentarios de reuniones, ideas clave, etc.)",
+                             value=cur_notes, height=140, key="mgr_notes_edit",
+                             placeholder="Ej.: Tendremos amistoso en septiembre; prioriza perfiles rápidos por banda; ...")
 
-    # Botón guardar protegido (deshabilitado si no hay selección)
-    if st.button("💾 Guardar entrenador/a", use_container_width=True, disabled=not bool(tname)):
-        conn.execute("UPDATE teams SET manager=? WHERE name=?", (new_mgr.strip(), tname))
-        conn.commit()
-        clear_caches()
-        st.success("Actualizado.")
+    # Guardado
+    save_cols = st.columns([1,1,2])
+    with save_cols[0]:
+        if st.button("💾 Guardar", use_container_width=True, disabled=not bool(tname)):
+            # Asegura que la columna manager_notes existe (por si entramos antes de que la migración haya corrido)
+            try:
+                conn.execute("ALTER TABLE teams ADD COLUMN manager_notes TEXT;")
+                conn.commit()
+            except Exception:
+                pass
+            conn.execute("UPDATE teams SET manager=?, manager_notes=? WHERE name=?",
+                         (new_mgr.strip(), new_notes.strip(), tname))
+            conn.commit()
+            clear_caches()
+            st.success("Datos de la selección actualizados.")
 
-    # ---------- Importar jugadoras dentro de Admin ----------
+    with save_cols[1]:
+        if st.button("🧹 Limpiar notas", use_container_width=True, disabled=not bool(tname)):
+            try:
+                conn.execute("UPDATE teams SET manager_notes=NULL WHERE name=?", (tname,))
+                conn.commit()
+                clear_caches()
+                st.success("Notas borradas.")
+                st.session_state["mgr_notes_edit"] = ""  # limpia el textarea
+            except Exception:
+                st.warning("No se pudieron limpiar las notas.")
+
     st.divider()
     st.subheader("Importar jugadoras desde Excel")
 
@@ -1001,13 +1026,45 @@ with tabs[0]:
             clear_caches()
             st.success(f"Importadas/actualizadas {n} jugadoras desde el archivo subido.")
 
-    # este divider VA al nivel de Admin, no dentro de colB
+    # Listado con banderas, manager y vista previa de notas
     st.divider()
     st.write("**Selecciones (Mundial 2025)**")
-    view = tdf[["name","manager"]].copy().rename(columns={"name":"Selección","manager":"Entrenador/a"})
+
+    # Relee para mostrar últimos cambios
+    tdf_list = list_teams().copy()
+    tdf_list = tdf_list[tdf_list["name"].isin(OFFICIAL_TEAMS)].copy()
+    if not tdf_list.empty:
+        tdf_list["_k"] = tdf_list["name"].astype(str).str.strip().str.casefold()
+        tdf_list = (
+            tdf_list.sort_values(["_k", "id"])
+                    .drop_duplicates(subset=["_k"], keep="last")
+                    .drop(columns=["_k"])
+                    .sort_values("name")
+        )
+
+    view = tdf_list[["name","manager","manager_notes"]].copy()
+    view.rename(columns={
+        "name":"Selección",
+        "manager":"Entrenador/a",
+        "manager_notes":"Notas (preview)"
+    }, inplace=True)
+
+    # Bandera
     view["Bandera"] = view["Selección"].apply(lambda n: flag_img_md(n, 20))
-    html = view[["Bandera","Selección","Entrenador/a"]].to_html(escape=False, index=False).replace("NaN","")
+    # Vista previa de notas (primera línea / 120 chars)
+    def _preview(s: Optional[str]) -> str:
+        if not isinstance(s, str) or not s.strip():
+            return ""
+        s1 = s.strip().splitlines()[0]
+        return (s1[:117] + "…") if len(s1) > 120 else s1
+
+    view["Notas (preview)"] = view["Notas (preview)"].apply(_preview)
+
+    html = view[["Bandera","Selección","Entrenador/a","Notas (preview)"]].to_html(
+        escape=False, index=False
+    ).replace("NaN","")
     st.markdown(html, unsafe_allow_html=True)
+
 
 # ========== Partidos ==========
 with tabs[1]:
